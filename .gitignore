@@ -1,0 +1,13 @@
+# Editor/IDE
+.idea/
+
+# Bytecode / caches
+__pycache__/
+*.pyc
+
+# Local assets & captures
+capture*.png
+
+# Build artifacts
+dist.zip
+
