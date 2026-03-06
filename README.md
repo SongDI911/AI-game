@@ -187,26 +187,26 @@ flowchart TD
   A[main.Game] -->|创建 | B[LevelManager]
   A --> C[RoomManager]
   A --> D[Player]
-  A --> E[HUD/RewardUI/MiniMap]
+  A --> E[HUD RewardUI MiniMap]
   A --> F[Effects]
   A --> G[Sound]
-  A --> H[Menu/Tutorial/Shop]
+  A --> H[Menu Tutorial Shop]
   
-  B -->|管理 | I[Chapter/Minigame/Transition]
+  B -->|管理 | I[Chapter Minigame Transition]
   C -->|当前房间 | J[Room]
-  J --> K[Enemies/Boss]
-  J --> L[Hitboxes(Attack)]
+  J --> K[Enemies Boss]
+  J --> L["Hitboxes Attack"]
   C --> M[Projectiles]
   
-  D -->|输入/移动/攻击 | J
+  D -->|输入移动攻击 | J
   D -->|技能 | N[Skills]
   N -->|事件 | J
   
-  J -->|命中事件/清理 | F
+  J -->|命中事件清理 | F
   C -->|子弹碰撞 | F
-  D -->|完美闪避/格挡 | F
+  D -->|完美闪避格挡 | F
   
-  A -->|每帧 | O[渲染：Room+Player+HUD+MiniMap]
+  A -->|每帧 | O[渲染 Room Player HUD MiniMap]
   O --> F
   
   style A fill:#4CAF50,color:#fff
