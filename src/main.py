@@ -233,14 +233,14 @@ class Game:
                 continue
 
             # 小游戏输入
-            if self.state == "minigame":
-                if event.type == pg.KEYDOWN and self.level_mgr.minigame_completed:
-                    # 小游戏完成后按任意键继续
-                    self.level_mgr.complete_minigame()
-                    self._start_chapter()
-                elif event.type == pg.MOUSEBUTTONDOWN:
-                    # 处理小游戏鼠标事件
-                    self.level_mgr.handle_minigame_event(event)
+            if self.state == "minigame" and self.level_mgr and self.level_mgr.minigame:
+                # 将事件传递给小游戏处理
+                if event.type in (pg.KEYDOWN, pg.MOUSEBUTTONDOWN):
+                    completed = self.level_mgr.handle_minigame_event(event)
+                    if completed:
+                        # 小游戏完成，进入下一关
+                        self.level_mgr.complete_minigame()
+                        self._start_chapter()
                 continue
 
             # gameover input
@@ -424,6 +424,7 @@ class Game:
         self.room_mgr.next_room()
         self.room_mgr.room_cleared = False
         self.reward_ui.active = False
+        self.state = "playing"
 
     def _update_and_draw_transition(self, dt: float):
         """更新并绘制关卡过渡界面"""
