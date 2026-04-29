@@ -42,6 +42,7 @@ from .skills import LungeSkill, ShockwaveSkill
 from . import assets
 from .events import DamageEvent
 from .direction import eight_way, smooth_facing, hysteresis_flip
+from .effects import ShockwaveRing, Particle, SlashArc, Explosion
 
 
 Vec = pg.Vector2
@@ -553,28 +554,30 @@ class Enemy(Entity):
         self.burn = (duration, dps, 0.25)
 
     def draw(self, surf: pg.Surface):
+        drawn = False
+
+        # 尝试绘制方向贴图
         dir_frames = getattr(self, 'dir_frames', None)
-        if dir_frames and len(dir_frames) >= 1:
+        if dir_frames and isinstance(dir_frames, dict) and len(dir_frames) > 0:
             key = eight_way(self.facing)
-            frames = dir_frames.get(key) or self.frames
-            idx = int(self.anim_t * 8) % len(frames)
-            img = frames[idx]
-            surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
-            if self.state == "telegraph":
-                col = TELEGRAPH_COLOR if self.blockable else TELEGRAPH_UNBLOCKABLE_COLOR
-                pg.draw.circle(surf, col, self.pos, self.radius + 10, 2)
-        elif getattr(self, 'frames', None):
-            if self.gen_dir_frames is None:
-                self.gen_dir_frames = assets.build_dir_from_single(self.frames)
-            key = eight_way(self.facing)
-            frames = self.gen_dir_frames.get(key) or self.frames
-            idx = int(self.anim_t * 8) % len(frames)
-            img = frames[idx]
-            surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
-            if self.state == "telegraph":
-                col = TELEGRAPH_COLOR if self.blockable else TELEGRAPH_UNBLOCKABLE_COLOR
-                pg.draw.circle(surf, col, self.pos, self.radius + 10, 2)
-        else:
+            frames = dir_frames.get(key)
+            if frames and len(frames) > 0:
+                idx = int(self.anim_t * 8) % len(frames)
+                img = frames[idx]
+                surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
+                drawn = True
+
+        # 尝试绘制普通贴图
+        if not drawn:
+            frames = getattr(self, 'frames', None)
+            if frames and len(frames) > 0:
+                idx = int(self.anim_t * 8) % len(frames)
+                img = frames[idx]
+                surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
+                drawn = True
+
+        # 如果没有贴图，绘制圆形
+        if not drawn:
             color = ENEMY_COLOR
             if self.elite:
                 color = (int(color[0]*0.9), int(color[1]*1.1), int(color[2]*1.2))
@@ -589,6 +592,23 @@ class Enemy(Entity):
                 self.flash = max(0.0, self.flash - 1/60)
             else:
                 self.draw_circle(surf, color)
+
+        # 绘制 telegraph 预警圈（无论是否有贴图）
+        if self.state == "telegraph" and drawn:
+            col = TELEGRAPH_COLOR if self.blockable else TELEGRAPH_UNBLOCKABLE_COLOR
+            pg.draw.circle(surf, col, self.pos, self.radius + 10, 2)
+
+        # 受击闪光覆盖层（有贴图时也显示）
+        if self.flash > 0 and drawn:
+            mix = min(1.0, self.flash / 0.08)
+            alpha = int(200 * mix)
+            flash_surf = pg.Surface((self.radius * 2 + 10, self.radius * 2 + 10), pg.SRCALPHA)
+            pg.draw.circle(flash_surf, (255, 255, 255, alpha),
+                          (flash_surf.get_width() // 2, flash_surf.get_height() // 2),
+                          self.radius + 5)
+            surf.blit(flash_surf, (self.pos.x - flash_surf.get_width() // 2,
+                                   self.pos.y - flash_surf.get_height() // 2))
+            self.flash = max(0.0, self.flash - 1/60)
 
 
 class Projectile:
@@ -691,10 +711,11 @@ class RangerEnemy(Enemy):
 
 class BossEnemy(Enemy):
     """Boss 敌人 - 拥有多种攻击模式和更高的属性"""
-    
+
     def __init__(self, pos: Tuple[int, int]):
         super().__init__(pos)
         self.hp = ENEMY_BASE_HP * 8  # Boss 基础生命值为普通敌人 8 倍
+        self.hp_max = ENEMY_BASE_HP * 8
         self.poise_max = 100  # 更高的韧性
         self.poise = self.poise_max
         self.radius = 28  # 更大的体型
@@ -703,30 +724,61 @@ class BossEnemy(Enemy):
         self.timer = 1.0
         self.attack_pattern = 0  # 当前攻击模式
         self.phase = 1  # Boss 阶段 (基于生命值)
+        self.phase_changed = False  # 阶段转换标记
         self.anim_t = 0.0
-        self.frames = assets.get_melee_enemy_frames()
-        self.dir_frames = assets.get_melee_enemy_dir_frames()
+        # Boss 专属贴图
+        self.frames = assets.get_boss_frames()
+        self.dir_frames = assets.get_boss_dir_frames()
         self.gen_dir_frames = None
         self.facing = Vec(1, 0)
         self.flip_x = False
         self.elite = True  # Boss 始终是精英
+        # Boss 特效
+        self.aura_timer = 0.0
+        self.charge_effect = None  # 冲锋轨迹
+        self.slam_aoe_pos = None  # 区域猛击 AOE 位置
+        self.slam_timer = 0.0
+        self.hurt_flash = 0.0
+        self.death_effect = None
     
     def update(self, dt: float, player: Player, world: "RoomManager"):
         # 阶段转换 (基于生命值百分比)
-        hp_percent = self.hp / (ENEMY_BASE_HP * 8)
+        hp_percent = self.hp / self.hp_max
+        old_phase = self.phase
         if hp_percent < 0.3:
             self.phase = 3
         elif hp_percent < 0.6:
             self.phase = 2
-        
+
+        # 阶段转换特效
+        if self.phase != old_phase and not self.phase_changed:
+            self.phase_changed = True
+            self._on_phase_change(world)
+
+        # 重置阶段转换标记
+        if self.phase_changed and self.state == "chase":
+            self.phase_changed = False
+
         to_player = player.pos - self.pos
         dist = to_player.length() or 1.0
         dir = to_player / dist
         self.facing = smooth_facing(self.facing, dir, 0.2)
-        
+
         # 韧性恢复
         self.poise = min(self.poise_max, self.poise + 5 * dt)
-        
+
+        # Boss 光环特效计时
+        if self.aura_timer > 0:
+            self.aura_timer -= dt
+
+        # 区域猛击 AOE 计时
+        if self.slam_timer > 0:
+            self.slam_timer -= dt
+            if self.slam_timer <= 0:
+                # 执行 AOE 伤害
+                self._do_slam_attack(world)
+                self.slam_aoe_pos = None
+
         if self.stun > 0:
             self.stun -= dt
             # 被击晕时缓慢漂移
@@ -740,23 +792,28 @@ class BossEnemy(Enemy):
                 self._choose_attack_pattern()
                 self.state = "telegraph"
                 self.timer = ENEMY_TELEGRAPH * 0.8  # Boss 前摇更短
-        
+
         elif self.state == "telegraph":
             self.timer -= dt
             if self.timer <= 0:
                 self.state = "attack"
                 self._perform_attack(world, dir)
-        
+
         elif self.state == "attack":
-            self.state = "recover"
-            self.timer = ENEMY_RECOVERY * 0.7  # Boss 后摇更短
-        
+            # 检查是否是双重打击的第二次攻击
+            if self.attack_pattern == "double_strike_2":
+                self.state = "recover"
+                self.timer = ENEMY_RECOVERY * 0.7
+            else:
+                self.state = "recover"
+                self.timer = ENEMY_RECOVERY * 0.7
+
         elif self.state == "recover":
             self.timer -= dt
             if self.timer <= 0:
                 self.state = "chase"
                 self.timer = random.uniform(0.5, 1.2)
-        
+
         # 燃烧 DoT
         if self.burn:
             t, dps, tick = self.burn
@@ -770,9 +827,13 @@ class BossEnemy(Enemy):
                 self.is_burning = False
             else:
                 self.burn = (t, dps, tick)
-        
+
+        # 受击闪光
+        if self.hurt_flash > 0:
+            self.hurt_flash -= dt
+
         # 动画
-        self.anim_t += dt * 1.2
+        self.anim_t += dt * (1.5 if self.phase == 3 else 1.2)
         self.flip_x = hysteresis_flip(self.flip_x, self.facing.x, 0.2)
     
     def _choose_attack_pattern(self):
@@ -789,45 +850,83 @@ class BossEnemy(Enemy):
         """执行 Boss 攻击"""
         now = pg.time.get_ticks() / 1000.0
         self.attack_time = now
-        
+
         if self.attack_pattern == "melee":
             # 普通近战攻击
             dmg = self.damage
             self._do_melee_attack(world, dir, dmg, radius=24)
-        
+            # 挥砍特效
+            SlashArc.add(world.effects, self.pos.copy(), dir, length=50, width=30, color=(255, 200, 150))
+
         elif self.attack_pattern == "charge":
             # 冲锋攻击：向玩家方向突进
             dmg = self.damage * 1.2
+            # 冲锋起点特效
+            Particle.burst(world.effects, self.pos.copy(), count=15, speed=200, color=(255, 100, 100))
             self.pos += dir * 80  # 突进
+            # 冲锋终点特效
+            Particle.burst(world.effects, self.pos.copy(), count=20, speed=250, color=(255, 150, 150))
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=40, color=(255, 80, 80), life=0.25)
             self._do_melee_attack(world, dir, dmg, radius=30)
-        
+
         elif self.attack_pattern == "spin":
             # 旋转攻击：360 度范围伤害
             dmg = self.damage * 0.8
+            # 旋转启动特效
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=60, color=(255, 200, 100), life=0.4)
             self._do_melee_attack(world, dir, dmg, radius=50)
-        
+            # 多方向粒子
+            for i in range(8):
+                angle = i * (math.tau / 8)
+                offset_pos = self.pos + Vec(math.cos(angle), math.sin(angle)) * 40
+                Particle.burst(world.effects, offset_pos, count=3, speed=100, color=(255, 180, 100))
+
         elif self.attack_pattern == "projectile":
             # 发射投射物
+            # 蓄力特效
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=35, color=(150, 100, 255), life=0.2)
             self._shoot_projectile(world, dir)
-        
+
         elif self.attack_pattern == "double_strike":
             # 双重打击：连续两次攻击
             dmg = self.damage * 0.9
             self._do_melee_attack(world, dir, dmg, radius=26)
-            # 延迟第二次攻击
-            pg.time.set_timer(pg.USEREVENT + 1, 300)
-        
+            SlashArc.add(world.effects, self.pos.copy(), dir, length=45, width=25, color=(255, 220, 180))
+            # 标记需要进行第二次攻击
+            self.attack_pattern = "double_strike_2"
+            self.timer = 0.3  # 300ms 后第二次攻击
+
+        elif self.attack_pattern == "double_strike_2":
+            # 双重打击第二次攻击
+            dmg = self.damage * 0.9
+            self._do_melee_attack(world, dir, dmg, radius=26)
+            SlashArc.add(world.effects, self.pos.copy(), dir, length=45, width=25, color=(255, 200, 160))
+            # 额外的冲击波
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=35, color=(255, 150, 100), life=0.25)
+
         elif self.attack_pattern == "area_slam":
             # 区域猛击：大范围高伤害
             dmg = self.damage * 1.5
-            self._do_melee_attack(world, dir, dmg, radius=60)
+            # 在玩家位置生成 AOE 预警
+            player = world.player
+            self.slam_aoe_pos = (player.pos.x, player.pos.y)
+            self.slam_timer = 0.6  # 0.6 秒后爆炸
+            self._slam_damage = dmg  # 存储伤害值
+            self._slam_target = player.pos.copy()
+            # 预警特效
+            ShockwaveRing.add(world.effects, player.pos.copy(), radius=60, color=(255, 50, 50), life=0.5)
+            # 预警粒子
+            for i in range(12):
+                angle = i * (math.tau / 12)
+                offset = player.pos + Vec(math.cos(angle), math.sin(angle)) * 50
+                Particle.burst(world.effects, offset, count=2, speed=80, color=(255, 30, 30))
     
     def _do_melee_attack(self, world: "RoomManager", dir: Vec, dmg: int, radius: int):
         """执行近战攻击"""
         ev = DamageEvent(self.pos + dir * (self.radius + 10), radius, int(dmg), "enemy", self.attack_time, True)
         from .rooms import GlobalEvents
         GlobalEvents.add_event(ev)
-        
+
         # 检测是否命中玩家
         player = world.player
         if (player.pos - ev.pos).length() <= (player.radius + ev.radius):
@@ -838,6 +937,38 @@ class BossEnemy(Enemy):
             elif outcome in ("blocked", "parry", "perfect_dodge"):
                 world.effects.shake.add(2.0, 0.1)
                 world.effects.hitstop.trigger(0.05)
+
+    def _do_slam_attack(self, world: "RoomManager"):
+        """执行区域猛击的延迟伤害"""
+        if not hasattr(self, '_slam_target') or not hasattr(self, '_slam_damage'):
+            return
+
+        # 在目标位置生成伤害区域
+        slam_pos = self._slam_target
+        dmg = int(self._slam_damage)
+
+        # 对范围内所有目标造成伤害
+        player = world.player
+        if (player.pos - slam_pos).length() <= 70:  # AOE 半径
+            # 命中玩家
+            dir = (player.pos - slam_pos)
+            if dir.length_squared() > 0:
+                dir = dir.normalize()
+            outcome = player.on_hit_by_enemy(dmg, dir, ENEMY_TELEGRAPH, pg.time.get_ticks()/1000, False)  # 不可格挡
+            if outcome == "hit":
+                world.effects.shake.add(6.0, 0.3)
+                world.effects.hitstop.trigger(0.15)
+            elif outcome == "perfect_dodge":
+                world.effects.shake.add(3.0, 0.15)
+
+        # 猛击特效
+        Explosion.add(world.effects, slam_pos, is_elite=True)
+        ShockwaveRing.add(world.effects, slam_pos, radius=70, color=(255, 100, 100), life=0.5)
+        Particle.burst(world.effects, slam_pos, count=35, speed=280, color=(255, 80, 80))
+
+        # 清除存储
+        delattr(self, '_slam_target')
+        delattr(self, '_slam_damage')
     
     def _shoot_projectile(self, world: "RoomManager", dir: Vec):
         """发射 Boss 投射物"""
@@ -853,43 +984,174 @@ class BossEnemy(Enemy):
             vel = rotated_dir * speed
             proj = Projectile(self.pos.copy(), vel, 8, int(ENEMY_ATTACK_DAMAGE * 1.2), life=3.0, owner="enemy")
             world.projectiles.append(proj)
+
+    def _on_phase_change(self, world: "RoomManager"):
+        """阶段转换时的特效"""
+        # 屏幕震动
+        world.effects.shake.add(5.0, 0.3)
+        # 爆炸特效
+        Explosion.add(world.effects, self.pos.copy(), is_elite=True)
+        # 生成粒子爆发
+        Particle.burst(world.effects, self.pos.copy(), count=40, speed=300, color=(255, 100, 100))
+        # 根据阶段播放不同效果
+        if self.phase == 2:
+            # 进入 P2：冲击波
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=150, color=(255, 80, 80), life=0.5)
+        elif self.phase == 3:
+            # 进入 P3：多重冲击波 + 子弹时间
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=200, color=(255, 50, 50), life=0.6)
+            ShockwaveRing.add(world.effects, self.pos.copy(), radius=100, color=(255, 100, 100), life=0.4)
+            # 短暂子弹时间
+            player = world.player
+            player._slowmo = 0.5  # 0.5 秒子弹时间
+
+    def on_damage(self, damage: int, world: "RoomManager"):
+        """Boss 受击时的特效"""
+        self.hurt_flash = 0.1
+        # 小概率触发受击停顿
+        if random.random() < 0.3:
+            world.effects.hitstop.trigger(0.03)
+        # 阶段转换时不触发受击特效
+        if self.phase_changed:
+            return
+        # 受击粒子
+        Particle.burst(world.effects, self.pos.copy(), count=6, speed=150, color=(255, 150, 150))
     
     def draw(self, surf: pg.Surface):
+        # 绘制 Boss 光环效果（P3 阶段）
+        if self.phase == 3 and self.aura_timer > 0:
+            aura_alpha = int(100 * (self.aura_timer / 0.5))
+            aura_surf = pg.Surface((self.radius * 4, self.radius * 4), pg.SRCALPHA)
+            pg.draw.circle(aura_surf, (255, 50, 50, aura_alpha),
+                          (aura_surf.get_width() // 2, aura_surf.get_height() // 2),
+                          self.radius + 10, width=3)
+            surf.blit(aura_surf, (self.pos.x - aura_surf.get_width() // 2,
+                                  self.pos.y - aura_surf.get_height() // 2))
+
+        # 尝试绘制 Boss 贴图
+        drawn = False
         dir_frames = getattr(self, 'dir_frames', None)
-        if dir_frames and len(dir_frames) >= 1:
+        if dir_frames and isinstance(dir_frames, dict) and len(dir_frames) > 0:
             key = eight_way(self.facing)
-            frames = dir_frames.get(key) or self.frames
-            idx = int(self.anim_t * 6) % len(frames)
-            img = frames[idx]
-            # Boss 更大
-            img = pg.transform.scale(img, (int(img.get_width() * 1.5), int(img.get_height() * 1.5)))
-            surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
-            # 显示 Boss 血条
-            self._draw_boss_hp_bar(surf)
-            # 攻击预警
-            if self.state == "telegraph":
+            frames = dir_frames.get(key)
+            if frames and len(frames) > 0:
+                idx = int(self.anim_t * 6) % len(frames)
+                img = frames[idx]
+                surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
+                drawn = True
+
+        if not drawn:
+            frames = getattr(self, 'frames', None)
+            if frames and len(frames) > 0:
+                idx = int(self.anim_t * 6) % len(frames)
+                img = frames[idx]
+                surf.blit(img, img.get_rect(center=(int(self.pos.x), int(self.pos.y))))
+                drawn = True
+
+        if not drawn:
+            # 无贴图时绘制红色大圆 + 阶段颜色
+            if self.hurt_flash > 0:
+                color = (255, 255, 255)  # 受击闪光
+            elif self.phase == 3:
+                color = (255, 50, 50)  # P3 红色
+            elif self.phase == 2:
+                color = (255, 100, 100)  # P2 橙色
+            else:
+                color = (255, 150, 150)  # P1 粉色
+            pg.draw.circle(surf, color, self.pos, self.radius)
+
+        # 受击闪光覆盖
+        if self.hurt_flash > 0:
+            hurt_surf = pg.Surface((self.radius * 2 + 10, self.radius * 2 + 10), pg.SRCALPHA)
+            alpha = int(200 * (self.hurt_flash / 0.1))
+            pg.draw.circle(hurt_surf, (255, 255, 255, alpha),
+                          (hurt_surf.get_width() // 2, hurt_surf.get_height() // 2),
+                          self.radius + 5)
+            surf.blit(hurt_surf, (self.pos.x - hurt_surf.get_width() // 2,
+                                  self.pos.y - hurt_surf.get_height() // 2))
+
+        # 显示 Boss 血条
+        self._draw_boss_hp_bar(surf)
+
+        # 攻击预警效果
+        if self.state == "telegraph":
+            if self.attack_pattern == "area_slam":
+                # 区域猛击：显示 AOE 范围
+                if self.slam_aoe_pos:
+                    slam_surf = pg.Surface((160, 160), pg.SRCALPHA)
+                    pg.draw.circle(slam_surf, (255, 0, 0, 80), (80, 80), 60, width=4)
+                    pg.draw.circle(slam_surf, (255, 50, 50, 40), (80, 80), 60)
+                    surf.blit(slam_surf, (self.slam_aoe_pos[0] - 80, self.slam_aoe_pos[1] - 80))
+            else:
+                # 其他攻击：显示预警圈
                 col = TELEGRAPH_UNBLOCKABLE_COLOR if self.attack_pattern in ("charge", "area_slam") else TELEGRAPH_COLOR
                 pg.draw.circle(surf, col, self.pos, self.radius + 15, 3)
-        else:
-            # 无贴图时绘制红色大圆
-            color = (255, 80, 80) if self.phase == 3 else (255, 120, 120)
-            pg.draw.circle(surf, color, self.pos, self.radius)
-            self._draw_boss_hp_bar(surf)
+
+        # 冲锋轨迹特效
+        if self.attack_pattern == "charge" and self.state == "attack":
+            trail_surf = pg.Surface((80, 40), pg.SRCALPHA)
+            pg.draw.ellipse(trail_surf, (255, 100, 100, 150), (0, 0, 80, 40))
+            angle = math.degrees(math.atan2(self.facing.y, self.facing.x))
+            rotated = pg.transform.rotate(trail_surf, -angle)
+            rect = rotated.get_rect(center=(int(self.pos.x), int(self.pos.y)))
+            surf.blit(rotated, rect)
     
     def _draw_boss_hp_bar(self, surf: pg.Surface):
         """绘制 Boss 血条"""
-        max_hp = ENEMY_BASE_HP * 8
-        hp_width = 120
-        hp_height = 8
-        hp_frac = max(0, self.hp / max_hp)
-        
+        hp_width = 160
+        hp_height = 10
+        hp_frac = max(0, self.hp / self.hp_max)
+
         x = self.pos.x - hp_width // 2
-        y = self.pos.y - self.radius - 20
-        
+        y = self.pos.y - self.radius - 25
+
         # 背景
-        pg.draw.rect(surf, (60, 30, 30), (x, y, hp_width, hp_height), border_radius=4)
-        # 血量
-        hp_color = (255, 50, 50) if self.phase == 3 else (255, 100, 100)
-        pg.draw.rect(surf, hp_color, (x, y, int(hp_width * hp_frac), hp_height), border_radius=4)
+        pg.draw.rect(surf, (60, 30, 30), (x - 2, y - 2, hp_width + 4, hp_height + 4), border_radius=6)
+        pg.draw.rect(surf, (40, 20, 20), (x, y, hp_width, hp_height), border_radius=4)
+
+        # 血量 - 根据阶段变化颜色
+        if self.phase == 3:
+            hp_color = (255, 30, 30)  # P3 红色
+        elif self.phase == 2:
+            hp_color = (255, 80, 80)  # P2 橙色
+        else:
+            hp_color = (255, 120, 120)  # P1 粉色
+
+        # 血条渐变效果
+        hp_w = int(hp_width * hp_frac)
+        if hp_w > 0:
+            pg.draw.rect(surf, hp_color, (x, y, hp_w, hp_height), border_radius=4)
+            # 高光
+            pg.draw.rect(surf, (255, 200, 200), (x, y, hp_w, hp_height // 3), border_radius=2)
+
         # 边框
-        pg.draw.rect(surf, (255, 200, 200), (x, y, hp_width, hp_height), 2, border_radius=4)
+        pg.draw.rect(surf, (255, 180, 180), (x, y, hp_width, hp_height), 2, border_radius=4)
+
+        # 阶段指示器
+        phase_colors = {1: (255, 150, 150), 2: (255, 100, 100), 3: (255, 50, 50)}
+        for i in range(3):
+            px = x + hp_width + 8 + i * 12
+            py = y + hp_height // 2 - 4
+            color = phase_colors.get(i + 1, (100, 100, 100))
+            if i + 1 <= self.phase:
+                pg.draw.circle(surf, color, (px, py), 5)
+                pg.draw.circle(surf, (255, 255, 255), (px, py), 5, width=1)
+            else:
+                pg.draw.circle(surf, (80, 80, 80), (px, py), 5)
+
+    def on_death(self, world: "RoomManager"):
+        """Boss 死亡特效"""
+        # 大型爆炸
+        Explosion.add(world.effects, self.pos.copy(), is_elite=True)
+        # 多重粒子爆发
+        Particle.burst(world.effects, self.pos.copy(), count=50, speed=350, color=(255, 100, 100))
+        Particle.burst(world.effects, self.pos.copy(), count=30, speed=280, color=(255, 200, 100))
+        # 冲击波
+        ShockwaveRing.add(world.effects, self.pos.copy(), radius=200, color=(255, 150, 150), life=0.8)
+        ShockwaveRing.add(world.effects, self.pos.copy(), radius=150, color=(255, 100, 100), life=0.6)
+        # 屏幕震动
+        world.effects.shake.add(8.0, 0.5)
+        # 命中停顿
+        world.effects.hitstop.trigger(0.2)
+        # 漂浮文字
+        world.effects.text.add("BOSS DEFEATED!", self.pos.copy(), color=(255, 200, 100))

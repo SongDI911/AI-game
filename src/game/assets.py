@@ -113,6 +113,8 @@ def preload():
         _ = get_melee_enemy_dir_frames()
         _ = get_ranger_enemy_frames()
         _ = get_ranger_enemy_dir_frames()
+        _ = get_boss_frames()
+        _ = get_boss_dir_frames()
     except Exception:
         # 预加载失败不影响运行
         pass
@@ -151,7 +153,14 @@ def get_melee_enemy_frames() -> List[pg.Surface]:
 
 @lru_cache(maxsize=None)
 def get_melee_enemy_dir_frames() -> Dict[str, List[pg.Surface]]:
-    return _load_directional(os.path.join(ASSET_ROOT, 'enemy', 'melee'), (44, 44))
+    dir_frames = _load_directional(os.path.join(ASSET_ROOT, 'enemy', 'melee'), (44, 44))
+    if dir_frames and len(dir_frames) > 0:
+        return dir_frames
+    # 回退：用单方向贴图生成八方向
+    frames = get_melee_enemy_frames()
+    if frames:
+        return build_dir_from_single(frames)
+    return {}
 
 
 @lru_cache(maxsize=None)
@@ -169,4 +178,47 @@ def get_ranger_enemy_frames() -> List[pg.Surface]:
 
 @lru_cache(maxsize=None)
 def get_ranger_enemy_dir_frames() -> Dict[str, List[pg.Surface]]:
-    return _load_directional(os.path.join(ASSET_ROOT, 'enemy', 'ranger'), (44, 44))
+    dir_frames = _load_directional(os.path.join(ASSET_ROOT, 'enemy', 'ranger'), (44, 44))
+    if dir_frames and len(dir_frames) > 0:
+        return dir_frames
+    # 回退：用单方向贴图生成八方向
+    frames = get_ranger_enemy_frames()
+    if frames:
+        return build_dir_from_single(frames)
+    return {}
+
+
+@lru_cache(maxsize=None)
+def get_boss_frames() -> List[pg.Surface]:
+    """加载 Boss 贴图序列帧"""
+    # 优先使用 assets/enemy/boss 目录
+    frames = _load_from_dir(os.path.join(ASSET_ROOT, 'enemy', 'boss'), (88, 88))
+    if len(frames) >= 4:
+        return frames
+    # 回退到 src/datas 按前缀组装 - 使用 1161 系列（8 帧 Boss 动画）
+    frames = _load_sequence("1161", (88, 88))
+    if len(frames) >= 6:
+        return frames
+    # 再次回退到其他备用序列
+    for prefix in ("1162", "1163", "1164", "1165", "1178", "1179", "1181", "1182"):
+        frames = _load_sequence(prefix, (88, 88))
+        if len(frames) >= 6:
+            return frames
+    # 最终回退到放大版的近战敌人贴图
+    melee_frames = get_melee_enemy_frames()
+    if melee_frames:
+        return [pg.transform.smoothscale(f, (88, 88)) for f in melee_frames]
+    return []
+
+
+@lru_cache(maxsize=None)
+def get_boss_dir_frames() -> Dict[str, List[pg.Surface]]:
+    """加载 Boss 八方向贴图"""
+    dir_frames = _load_directional(os.path.join(ASSET_ROOT, 'enemy', 'boss'), (88, 88))
+    if dir_frames:
+        return dir_frames
+    # 回退：用单方向生成八方向
+    frames = get_boss_frames()
+    if frames:
+        return build_dir_from_single(frames)
+    return {}

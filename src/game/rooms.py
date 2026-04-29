@@ -10,7 +10,7 @@ import pygame as pg
 from .config import WIDTH, HEIGHT, ATTACK_COLOR
 from .entities import Enemy, RangerEnemy, Projectile
 from .events import DamageEvent
-from .effects import Effects
+from .effects import Effects, ShockwaveRing
 from .combat import Attack
 
 # 加载地图背景
@@ -128,6 +128,21 @@ class Room:
                         self.effects.shake.add(2.0, 0.1)
                         self.effects.text.add(str(final), (e.pos.x, e.pos.y))
                         hb.already_hit.add(hb.hit_id(e))
+                        # 受击特效
+                        try:
+                            from .effects import Particle, QuickFlash, SlashArc
+                            impact_dir = (e.pos - hb.origin)
+                            if impact_dir.length_squared() > 0:
+                                impact_dir = impact_dir.normalize()
+                            # 粒子喷溅
+                            Particle.spray(self.effects, e.pos, impact_dir, count=8, speed=160, spread_deg=45, color=(255, 220, 150))
+                            # 受击闪光
+                            QuickFlash.add(self.effects, e.pos, radius=12)
+                            # 精英敌人额外金色粒子
+                            if getattr(e, 'elite', False):
+                                Particle.burst(self.effects, e.pos, count=4, speed=120, color=(255, 200, 100))
+                        except Exception:
+                            pass
             if not hb.done():
                 alive_hit.append(hb)
         self.hitboxes = alive_hit
@@ -137,7 +152,13 @@ class Room:
             for de in dead_list:
                 try:
                     from .effects import Explosion
-                    Explosion.add(self.effects, de.pos, is_elite=de.elite)
+                    # 检查是否是 Boss
+                    from .entities import BossEnemy
+                    if isinstance(de, BossEnemy):
+                        # Boss 专属死亡特效
+                        de.on_death(self.effects)
+                    else:
+                        Explosion.add(self.effects, de.pos, is_elite=de.elite)
                 except Exception:
                     pass
 
@@ -157,8 +178,23 @@ class Room:
                         try:
                             from .effects import Particle, QuickFlash
                             impact_dir = (e.pos - ev.pos)
-                            Particle.spray(self.effects, e.pos, impact_dir, count=10, speed=180, spread_deg=50, color=(255,220,150))
+                            if impact_dir.length_squared() > 0:
+                                impact_dir = impact_dir.normalize()
+                            # 基础受击特效
+                            Particle.spray(self.effects, e.pos, impact_dir, count=10, speed=180, spread_deg=50, color=(255, 220, 150))
                             QuickFlash.add(self.effects, e.pos, radius=14)
+                            # Boss 额外特效
+                            from .entities import BossEnemy
+                            if isinstance(e, BossEnemy):
+                                # Boss 受击：更多粒子 + 小冲击波
+                                Particle.burst(self.effects, e.pos, count=15, speed=200, color=(255, 100, 100))
+                                ShockwaveRing.add(self.effects, e.pos, radius=20, color=(255, 80, 80), life=0.15)
+                                # 阶段转换时不触发额外受击特效
+                                if not getattr(e, 'phase_changed', False):
+                                    e.on_damage(final, self.effects)
+                            # 精英敌人额外金色粒子
+                            elif getattr(e, 'elite', False):
+                                Particle.burst(self.effects, e.pos, count=6, speed=140, color=(255, 200, 100))
                         except Exception:
                             pass
                 try:
